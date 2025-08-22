@@ -68,12 +68,14 @@ public class User {
 	public void clearVisitedLocations() {
 		visitedLocations.clear();
 	}
-	
-	public void addUserReward(UserReward userReward) {
-		if(userRewards.stream().filter(r -> !r.attraction.attractionName.equals(userReward.attraction)).count() == 0) {
-			userRewards.add(userReward);
-		}
-	}
+
+    public void addUserReward(UserReward userReward) {
+        boolean isNewReward = userRewards.stream()
+                .noneMatch(r -> r.attraction.attractionName.equals(userReward.attraction.attractionName));
+        if (isNewReward) {
+            userRewards.add(userReward);
+        }
+    }
 	
 	public List<UserReward> getUserRewards() {
 		return userRewards;

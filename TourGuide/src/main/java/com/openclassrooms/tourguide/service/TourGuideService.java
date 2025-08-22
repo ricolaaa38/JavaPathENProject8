@@ -1,5 +1,6 @@
 package com.openclassrooms.tourguide.service;
 
+import com.openclassrooms.tourguide.dto.NearbyAttractionDTO;
 import com.openclassrooms.tourguide.helper.InternalTestHelper;
 import com.openclassrooms.tourguide.tracker.Tracker;
 import com.openclassrooms.tourguide.user.User;
@@ -7,14 +8,7 @@ import com.openclassrooms.tourguide.user.UserReward;
 
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
-import java.util.ArrayList;
-import java.util.Date;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Random;
-import java.util.UUID;
+import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -32,6 +26,10 @@ import tripPricer.TripPricer;
 
 @Service
 public class TourGuideService {
+
+    private static final int NEARBY_ATTRACTIONS_LIMIT = 5;
+    private static final int TRIP_DEAL_COUNT = 10;
+
 	private Logger logger = LoggerFactory.getLogger(TourGuideService.class);
 	private final GpsUtil gpsUtil;
 	private final RewardsService rewardsService;
@@ -80,10 +78,16 @@ public class TourGuideService {
 	}
 
 	public List<Provider> getTripDeals(User user) {
-		int cumulatativeRewardPoints = user.getUserRewards().stream().mapToInt(i -> i.getRewardPoints()).sum();
-		List<Provider> providers = tripPricer.getPrice(tripPricerApiKey, user.getUserId(),
-				user.getUserPreferences().getNumberOfAdults(), user.getUserPreferences().getNumberOfChildren(),
-				user.getUserPreferences().getTripDuration(), cumulatativeRewardPoints);
+		int cumulatativeRewardPoints = user.getUserRewards().stream().mapToInt(UserReward::getRewardPoints).sum();
+		List<Provider> providers = new ArrayList<>();
+        while (providers.size() < TRIP_DEAL_COUNT) {
+            providers.addAll(tripPricer.getPrice(tripPricerApiKey, user.getUserId(),
+                    user.getUserPreferences().getNumberOfAdults(), user.getUserPreferences().getNumberOfChildren(),
+                    user.getUserPreferences().getTripDuration(), cumulatativeRewardPoints));
+        }
+        if (providers.size() > TRIP_DEAL_COUNT) {
+            providers = providers.subList(0, TRIP_DEAL_COUNT);
+        }
 		user.setTripDeals(providers);
 		return providers;
 	}
@@ -95,16 +99,61 @@ public class TourGuideService {
 		return visitedLocation;
 	}
 
-	public List<Attraction> getNearByAttractions(VisitedLocation visitedLocation) {
-		List<Attraction> nearbyAttractions = new ArrayList<>();
-		for (Attraction attraction : gpsUtil.getAttractions()) {
-			if (rewardsService.isWithinAttractionProximity(attraction, visitedLocation.location)) {
-				nearbyAttractions.add(attraction);
-			}
-		}
+    public List<gpsUtil.location.Attraction> getNearByAttractions(gpsUtil.location.VisitedLocation visitedLocation) {
+        return gpsUtil.getAttractions().stream()
+                .sorted(java.util.Comparator.comparingDouble(a -> rewardsService.getDistance(a, visitedLocation.location)))
+                .limit(NEARBY_ATTRACTIONS_LIMIT)
+                .collect(java.util.stream.Collectors.toList());
+    }
 
-		return nearbyAttractions;
-	}
+    public List<NearbyAttractionDTO> getNearByAttractionsDetails(VisitedLocation visitedLocation, User user) {
+        Location userLocation = visitedLocation.location;
+        return gpsUtil.getAttractions().stream()
+                .sorted(Comparator.comparingDouble(a -> rewardsService.getDistance(a, userLocation)))
+                .limit(NEARBY_ATTRACTIONS_LIMIT)
+                .map(a -> {
+                    double distance = rewardsService.getDistance(a, userLocation);
+                    int points = rewardsService.getRewardPointsForAttraction(a, user);
+                    return new NearbyAttractionDTO(
+                            a.attractionName,
+                            a.latitude,
+                            a.longitude,
+                            userLocation.latitude,
+                            userLocation.longitude,
+                            distance,
+                            points
+                    );
+                })
+                .collect(Collectors.toList());
+    }
+
+    // Method for internal testing, not used in production
+    // Uncomment if you want to use it for testing purposes
+//    public List<NearbyAttractionDTO> getNearByAttractionsDetails(VisitedLocation visitedLocation, User user) {
+//        Location userLocation = visitedLocation.location;
+//        List<NearbyAttractionDTO> result = gpsUtil.getAttractions().stream()
+//                .sorted(Comparator.comparingDouble(a -> rewardsService.getDistance(a, userLocation)))
+//                .limit(NEARBY_ATTRACTIONS_LIMIT)
+//                .map(a -> {
+//                    double distance = rewardsService.getDistance(a, userLocation);
+//                    int points = rewardsService.getRewardPointsForAttraction(a, user);
+//                    return new NearbyAttractionDTO(
+//                            a.attractionName,
+//                            a.latitude,
+//                            a.longitude,
+//                            userLocation.latitude,
+//                            userLocation.longitude,
+//                            distance,
+//                            points
+//                    );
+//                })
+//                .collect(Collectors.toList());
+//
+//        logger.info("Nearby attractions for user '{}' at [{}, {}]: {}",
+//                user.getUserName(), userLocation.latitude, userLocation.longitude, result);
+//
+//        return result;
+//    }
 
 	private void addShutDownHook() {
 		Runtime.getRuntime().addShutdownHook(new Thread() {
