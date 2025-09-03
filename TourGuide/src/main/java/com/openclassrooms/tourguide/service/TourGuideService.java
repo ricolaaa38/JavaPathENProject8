@@ -9,6 +9,9 @@ import com.openclassrooms.tourguide.user.UserReward;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -36,12 +39,26 @@ public class TourGuideService {
 	private final TripPricer tripPricer = new TripPricer();
 	public final Tracker tracker;
 	boolean testMode = true;
+    
+    // Executor service to track user locations concurrently
+    private final ExecutorService trackingExecutor;
 
 	public TourGuideService(GpsUtil gpsUtil, RewardsService rewardsService) {
 		this.gpsUtil = gpsUtil;
 		this.rewardsService = rewardsService;
 		
 		Locale.setDefault(Locale.US);
+
+        // Adjust the number of threads based on the number of users
+        int users = InternalTestHelper.getInternalUserNumber();
+        int threads = computeIoThreads(users);
+        this.trackingExecutor = Executors.newFixedThreadPool(threads, r -> {
+            Thread t = new Thread(r);
+            t.setName("tg-io-" + t.getId());
+            t.setDaemon(true);
+            return t;
+        });
+        logger.info("Tracking executor size: {}", threads);
 
 		if (testMode) {
 			logger.info("TestMode enabled");
@@ -53,14 +70,21 @@ public class TourGuideService {
 		addShutDownHook();
 	}
 
+    // Compute optimal number of I/O threads based on users and CPU cores
+    private int computeIoThreads(int users) {
+        int cpu = Runtime.getRuntime().availableProcessors();
+        int ioHint = Math.max(cpu * 8, 32);     // base I/O
+        int byUsers = Math.min(users, 512);     // borne haute raisonnable
+        return Math.max(2, Math.max(ioHint, byUsers));
+    }
+
 	public List<UserReward> getUserRewards(User user) {
 		return user.getUserRewards();
 	}
 
 	public VisitedLocation getUserLocation(User user) {
-		VisitedLocation visitedLocation = (user.getVisitedLocations().size() > 0) ? user.getLastVisitedLocation()
-				: trackUserLocation(user);
-		return visitedLocation;
+        return (!user.getVisitedLocations().isEmpty()) ? user.getLastVisitedLocation()
+                : trackUserLocation(user);
 	}
 
 	public User getUser(String userName) {
@@ -68,13 +92,11 @@ public class TourGuideService {
 	}
 
 	public List<User> getAllUsers() {
-		return internalUserMap.values().stream().collect(Collectors.toList());
+		return new ArrayList<>(internalUserMap.values());
 	}
 
 	public void addUser(User user) {
-		if (!internalUserMap.containsKey(user.getUserName())) {
-			internalUserMap.put(user.getUserName(), user);
-		}
+		internalUserMap.putIfAbsent(user.getUserName(), user);
 	}
 
 	public List<Provider> getTripDeals(User user) {
@@ -92,12 +114,39 @@ public class TourGuideService {
 		return providers;
 	}
 
+    // Track user location and add it to their visited locations
 	public VisitedLocation trackUserLocation(User user) {
 		VisitedLocation visitedLocation = gpsUtil.getUserLocation(user.getUserId());
 		user.addToVisitedLocations(visitedLocation);
-		rewardsService.calculateRewards(user);
 		return visitedLocation;
 	}
+
+    // Track user location and calculate rewards concurrently
+    public void trackUserLocationAndCalculateRewards(User user) {
+        trackUserLocation(user);
+        rewardsService.calculateRewards(user);
+    }
+
+    public List<VisitedLocation> trackAllUserLocationAsync(Collection<User> users) {
+        List<CompletableFuture<VisitedLocation>> futures = users.stream()
+                .map(user -> CompletableFuture.supplyAsync(() -> trackUserLocation(user), trackingExecutor))
+                .toList();
+        return futures.stream().map(CompletableFuture::join).toList();
+    }
+
+    public void trackAllUsersAndCalculateRewardsAsync(Collection<User> users) {
+        List<CompletableFuture<Void>> futures = users.stream()
+                .map(user -> CompletableFuture.runAsync(() -> trackUserLocationAndCalculateRewards(user), trackingExecutor))
+                .toList();
+        futures.forEach(CompletableFuture::join);
+    }
+
+    public void calculateRewardsForAllUsersAsync(Collection<User> users) {
+        List<CompletableFuture<Void>> futures = users.stream()
+                .map(user -> CompletableFuture.runAsync(() -> rewardsService.calculateRewards(user), trackingExecutor))
+                .toList();
+        futures.forEach(CompletableFuture::join);
+    }
 
     public List<gpsUtil.location.Attraction> getNearByAttractions(gpsUtil.location.VisitedLocation visitedLocation) {
         return gpsUtil.getAttractions().stream()
@@ -106,14 +155,15 @@ public class TourGuideService {
                 .collect(java.util.stream.Collectors.toList());
     }
 
-    public List<NearbyAttractionDTO> getNearByAttractionsDetails(VisitedLocation visitedLocation, User user) {
+    public List<NearbyAttractionDTO> getNearByAttractionsDetails(VisitedLocation visitedLocation) {
         Location userLocation = visitedLocation.location;
-        return gpsUtil.getAttractions().stream()
+        UUID userId = visitedLocation.userId;
+        List<NearbyAttractionDTO> result = gpsUtil.getAttractions().stream()
                 .sorted(Comparator.comparingDouble(a -> rewardsService.getDistance(a, userLocation)))
                 .limit(NEARBY_ATTRACTIONS_LIMIT)
                 .map(a -> {
                     double distance = rewardsService.getDistance(a, userLocation);
-                    int points = rewardsService.getRewardPointsForAttraction(a, user);
+                    int points = rewardsService.getRewardPointsForAttraction(a, userId);
                     return new NearbyAttractionDTO(
                             a.attractionName,
                             a.latitude,
@@ -125,42 +175,19 @@ public class TourGuideService {
                     );
                 })
                 .collect(Collectors.toList());
+
+        logger.info("Nearby attractions for userId {} at [{}, {}]: {}",
+                userId, userLocation.latitude, userLocation.longitude, result);
+
+        return result;
     }
 
-    // Method for internal testing, not used in production
-    // Uncomment if you want to use it for testing purposes
-//    public List<NearbyAttractionDTO> getNearByAttractionsDetails(VisitedLocation visitedLocation, User user) {
-//        Location userLocation = visitedLocation.location;
-//        List<NearbyAttractionDTO> result = gpsUtil.getAttractions().stream()
-//                .sorted(Comparator.comparingDouble(a -> rewardsService.getDistance(a, userLocation)))
-//                .limit(NEARBY_ATTRACTIONS_LIMIT)
-//                .map(a -> {
-//                    double distance = rewardsService.getDistance(a, userLocation);
-//                    int points = rewardsService.getRewardPointsForAttraction(a, user);
-//                    return new NearbyAttractionDTO(
-//                            a.attractionName,
-//                            a.latitude,
-//                            a.longitude,
-//                            userLocation.latitude,
-//                            userLocation.longitude,
-//                            distance,
-//                            points
-//                    );
-//                })
-//                .collect(Collectors.toList());
-//
-//        logger.info("Nearby attractions for user '{}' at [{}, {}]: {}",
-//                user.getUserName(), userLocation.latitude, userLocation.longitude, result);
-//
-//        return result;
-//    }
 
 	private void addShutDownHook() {
-		Runtime.getRuntime().addShutdownHook(new Thread() {
-			public void run() {
-				tracker.stopTracking();
-			}
-		});
+		Runtime.getRuntime().addShutdownHook( new Thread(() -> {
+            tracker.stopTracking();
+            trackingExecutor.shutdownNow();
+        }));
 	}
 
 	/**********************************************************************************

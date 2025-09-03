@@ -1,7 +1,9 @@
 package com.openclassrooms.tourguide.service;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.UUID;
 
 import org.springframework.stereotype.Service;
 
@@ -23,10 +25,14 @@ public class RewardsService {
 	private int attractionProximityRange = 200;
 	private final GpsUtil gpsUtil;
 	private final RewardCentral rewardsCentral;
-	
+
+    // Cache for attractions to avoid repeated calls to gpsUtil
+    private final List<Attraction> attractionsCache;
+
 	public RewardsService(GpsUtil gpsUtil, RewardCentral rewardCentral) {
 		this.gpsUtil = gpsUtil;
 		this.rewardsCentral = rewardCentral;
+        this.attractionsCache = List.copyOf(gpsUtil.getAttractions());
 	}
 	
 	public void setProximityBuffer(int proximityBuffer) {
@@ -39,16 +45,19 @@ public class RewardsService {
 
 	public void calculateRewards(User user) {
 		List<VisitedLocation> userLocations = new ArrayList<>(user.getVisitedLocations());
-		List<Attraction> attractions = gpsUtil.getAttractions();
+		List<Attraction> attractions = attractionsCache;
 
 		for(VisitedLocation visitedLocation : userLocations) {
-			for(Attraction attraction : attractions) {
-				if(user.getUserRewards().stream().noneMatch(r -> r.attraction.attractionName.equals(attraction.attractionName))) {
-					if(nearAttraction(visitedLocation, attraction)) {
-						user.addUserReward(new UserReward(visitedLocation, attraction, getRewardPoints(attraction, user)));
-					}
-				}
-			}
+            for (Attraction attraction : attractions) {
+                boolean alreadyRewarded = user.getUserRewards().stream()
+                        .anyMatch(r -> r.attraction.attractionName.equals(attraction.attractionName));
+                if (alreadyRewarded) {
+                    continue;
+                }
+                if (nearAttraction(visitedLocation, attraction)) {
+                    user.addUserReward(new UserReward(visitedLocation, attraction, getRewardPoints(attraction, user)));
+                }
+            }
 		}
 	}
 	
@@ -78,8 +87,8 @@ public class RewardsService {
         return statuteMiles;
 	}
 
-    public int getRewardPointsForAttraction(Attraction attraction, User user) {
-        return rewardsCentral.getAttractionRewardPoints(attraction.attractionId, user.getUserId());
+    public int getRewardPointsForAttraction(Attraction attraction, UUID userId) {
+        return rewardsCentral.getAttractionRewardPoints(attraction.attractionId, userId);
     }
 
 }
