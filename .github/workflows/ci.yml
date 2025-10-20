@@ -35,3 +35,9 @@ jobs:
 
       - name: Run unit tests only
         run: mvn test -Dgroups="!performance"
+
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: tourguide-jar
+          path: TourGuide/target/*.jar
