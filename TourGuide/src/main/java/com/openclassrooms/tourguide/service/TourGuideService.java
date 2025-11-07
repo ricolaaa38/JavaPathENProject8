@@ -73,8 +73,8 @@ public class TourGuideService {
     // Compute optimal number of I/O threads based on users and CPU cores
     private int computeIoThreads(int users) {
         int cpu = Runtime.getRuntime().availableProcessors();
-        int ioHint = Math.max(cpu * 8, 32);     // base I/O
-        int byUsers = Math.min(users, 512);     // borne haute raisonnable
+        int ioHint = Math.max(cpu * 8, 32);
+        int byUsers = Math.min(users, 512);
         return Math.max(2, Math.max(ioHint, byUsers));
     }
 
